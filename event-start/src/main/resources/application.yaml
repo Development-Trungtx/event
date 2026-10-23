@@ -1,0 +1,42 @@
+server:
+  port: ${SERVER_PORT:9094}
+  tomcat:
+    accept-count: 2000
+    max-connections: 10000
+
+
+spring:
+  application:
+    name: event-start
+
+  #DBS
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/admin}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: EventTicketHikariPool
+      maximum-pool-size: 100
+      minimum-idle: 20
+      connection-timeout: 3000
+      validation-timeout: 1000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 5000
+  flyway:
+    enabled: true
+    default-schema: ${DB_SCHEMA:event_ticket}
+    schemas: ${DB_SCHEMA:event_ticket}
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+  jpa:
+    open-in-view: false
+    show-sql: true
+    hibernate:
+      ddl-auto: validate
+      properties:
+        hibernate:
+          default_schema: ${DB_SCHEMA:event_ticket}
+          jdbc:
+            time_zone: UTC
