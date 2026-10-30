@@ -1,11 +1,6 @@
-server:
-  port: ${SERVER_PORT:9094}
-  tomcat:
-    accept-count: 2000
-    max-connections: 10000
-
-
 spring:
+  profiles:
+    default: local
   application:
     name: event-start
 
