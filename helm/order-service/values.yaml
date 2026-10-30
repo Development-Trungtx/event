@@ -1,0 +1,88 @@
+# Defaults shared by dev/prod. Secrets must already exist in the target namespace.
+replicaCount: 1
+image:
+  repository: ghcr.io/example/order-service
+  # CD always overrides this with a real, scanned digest. The zero digest is for lint only.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+serviceAccount:
+  create: true
+  name: ""
+service:
+  port: 8080
+containerPort: 8080
+springProfile: dev
+config:
+  SERVER_SHUTDOWN: graceful
+  SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE: 20s
+  MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info
+  MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: never
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70.0 -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=/tmp"
+# List of existing Secret names. Keys become environment variables (e.g. SPRING_DATASOURCE_PASSWORD).
+existingSecrets: []
+# Extra non-secret environment variables. Keep all values as strings.
+extraEnv: {}
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 768Mi
+strategy:
+  maxUnavailable: 0
+  maxSurge: 1
+minReadySeconds: 5
+progressDeadlineSeconds: 600
+terminationGracePeriodSeconds: 40
+probes:
+  startup:
+    path: /actuator/health/liveness
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 60
+  readiness:
+    path: /actuator/health/readiness
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    path: /actuator/health/liveness
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+ingress:
+  enabled: false
+  className: ""
+  host: order.example.com
+  annotations: {}
+  tlsSecretName: ""
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+networkPolicy:
+  # Enable only after specifying ingress-controller and dependency connectivity below.
+  enabled: false
+  ingress: []
+  egress: []
+releaseMetadata:
+  sourceSha: ""
+  runUrl: ""

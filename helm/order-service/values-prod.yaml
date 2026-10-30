@@ -1,0 +1,18 @@
+# Two replicas help rolling updates; one PC is still a single point of failure.
+replicaCount: 2
+springProfile: prod
+resources:
+  requests: {cpu: 200m, memory: 384Mi}
+  limits: {cpu: "1", memory: 1Gi}
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+imagePullSecrets:
+ - name: ghcr-pull
+# existingSecrets:
+#   - order-service-config
+# ingress:
+#   enabled: true
+#   className: traefik
+#   host: order.your-domain.example
+#   tlsSecretName: order-service-tls

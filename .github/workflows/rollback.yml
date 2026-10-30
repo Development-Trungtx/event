@@ -1,0 +1,80 @@
+name: Manual rollback
+run-name: Rollback ${{ inputs.target_environment }} to revision ${{ inputs.revision }}
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: Environment to recover
+        type: choice
+        options: [dev, production]
+        required: true
+      revision:
+        description: Existing successful Helm revision number
+        required: true
+        type: string
+      confirm_release:
+        description: Type the exact Helm release name to confirm the target
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  rollback:
+    # Run the recovery script from the protected master branch only.
+    if: github.ref == 'refs/heads/master'
+    runs-on: [self-hosted, linux, x64, k8s-deploy]
+    environment:
+      name: ${{ inputs.target_environment }}
+    concurrency:
+      group: deploy-${{ github.repository }}-${{ inputs.target_environment }}
+      cancel-in-progress: false
+    timeout-minutes: 20
+    env:
+      NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+      RELEASE_NAME: ${{ vars.HELM_RELEASE }}
+      EXPECTED_KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT }}
+      SERVICE_PORT: ${{ vars.SERVICE_PORT || '8080' }}
+      SMOKE_URL: ${{ vars.SMOKE_URL }}
+      SMOKE_PATH: ${{ vars.SMOKE_PATH || '/actuator/health/readiness' }}
+      SMOKE_BUSINESS_URL: ${{ vars.SMOKE_BUSINESS_URL }}
+    steps:
+      - name: Prepare diagnostic path
+        run: echo "DIAGNOSTICS_DIR=$RUNNER_TEMP/rollback-diagnostics-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          clean: true
+      - name: Validate operator inputs
+        env:
+          REVISION: ${{ inputs.revision }}
+          CONFIRM_RELEASE: ${{ inputs.confirm_release }}
+        run: |
+          [[ "$CONFIRM_RELEASE" == "$RELEASE_NAME" && -n "$RELEASE_NAME" ]]
+          [[ "$REVISION" =~ ^[1-9][0-9]*$ ]]
+      - name: Prepare temporary kubeconfig
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: bash scripts/setup-kubeconfig.sh
+      - name: Restore revision and smoke-test it
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: bash scripts/rollback.sh "$REVISION"
+      - name: Collect limited diagnostics
+        if: failure()
+        run: bash scripts/collect-diagnostics.sh
+      - name: Save diagnostics
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: rollback-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.DIAGNOSTICS_DIR }}/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Remove temporary files
+        if: always()
+        run: |
+          if [[ -n "${KUBECONFIG:-}" && "$KUBECONFIG" == "$RUNNER_TEMP"/kubeconfig.* ]]; then
+            rm -f -- "$KUBECONFIG"
+          fi
+          rm -rf -- "$DIAGNOSTICS_DIR"

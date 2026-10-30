@@ -1,0 +1,84 @@
+name: Reusable deployment
+on:
+  workflow_call:
+    inputs:
+      target_environment:
+        required: true
+        type: string
+      bundle_name:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'push' &&
+      ((inputs.target_environment == 'dev' && github.ref == 'refs/heads/dev') ||
+       (inputs.target_environment == 'production' && github.ref == 'refs/heads/master'))
+    runs-on: [self-hosted, linux, x64, k8s-deploy]
+    timeout-minutes: 35
+    environment:
+      name: ${{ inputs.target_environment }}
+    concurrency:
+      group: deploy-${{ github.repository }}-${{ inputs.target_environment }}
+      cancel-in-progress: false
+    env:
+      TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+      EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
+      NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+      RELEASE_NAME: ${{ vars.HELM_RELEASE }}
+      EXPECTED_KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT }}
+      SERVICE_PORT: ${{ vars.SERVICE_PORT || '8080' }}
+      SMOKE_URL: ${{ vars.SMOKE_URL }}
+      SMOKE_PATH: ${{ vars.SMOKE_PATH || '/actuator/health/readiness' }}
+      SMOKE_EXPECTED_STATUS: UP
+      SMOKE_BUSINESS_URL: ${{ vars.SMOKE_BUSINESS_URL }}
+      DEPLOY_TIMEOUT: 10m
+    steps:
+      - name: Prepare isolated temporary paths
+        run: |
+          echo "BUNDLE_DIR=$RUNNER_TEMP/release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$TARGET_ENVIRONMENT" >> "$GITHUB_ENV"
+          echo "DIAGNOSTICS_DIR=$RUNNER_TEMP/diagnostics-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$TARGET_ENVIRONMENT" >> "$GITHUB_ENV"
+      - name: Download only the bundle from this workflow run
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ inputs.bundle_name }}
+          path: ${{ env.BUNDLE_DIR }}
+      - name: Check bundle integrity
+        working-directory: ${{ env.BUNDLE_DIR }}
+        run: sha256sum --check SHA256SUMS
+      - id: candidate
+        name: Reject mismatched metadata and skip obsolete candidates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$BUNDLE_DIR/scripts/check-candidate.py"
+      - name: Prepare temporary namespace-scoped kubeconfig
+        if: steps.candidate.outputs.deploy == 'true'
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG_B64 }}
+        run: bash "$BUNDLE_DIR/scripts/setup-kubeconfig.sh"
+      - name: Deploy, verify and recover on failure
+        if: steps.candidate.outputs.deploy == 'true'
+        run: bash "$BUNDLE_DIR/scripts/deploy.sh"
+      - name: Explain obsolete candidate
+        if: steps.candidate.outputs.deploy == 'false'
+        run: echo 'Skipped deployment because the source branch moved before CD started.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Save limited failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: deploy-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.target_environment }}
+          path: ${{ env.DIAGNOSTICS_DIR }}/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Remove temporary credentials and bundle
+        if: always()
+        run: |
+          if [[ -n "${KUBECONFIG:-}" && "$KUBECONFIG" == "$RUNNER_TEMP"/kubeconfig.* ]]; then
+            rm -f -- "$KUBECONFIG"
+          fi
+          rm -rf -- "$BUNDLE_DIR" "$DIAGNOSTICS_DIR"

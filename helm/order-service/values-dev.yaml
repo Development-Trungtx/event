@@ -1,0 +1,10 @@
+replicaCount: 1
+springProfile: dev
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {cpu: "1", memory: 768Mi}
+# For a private GHCR package, create this secret first and uncomment:
+imagePullSecrets:
+ - name: ghcr-pull
+# existingSecrets:
+#   - order-service-config

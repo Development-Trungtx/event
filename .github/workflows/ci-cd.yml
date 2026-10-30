@@ -1,0 +1,158 @@
+name: Service CI-CD
+run-name: CI-CD ${{ github.ref_name }} / ${{ github.sha }}
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+    types: [checks_requested]
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    # Cancel obsolete CI only. Never apply cancel-in-progress=true to the whole workflow.
+    concurrency:
+      group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Install checksum-locked CI tools
+        run: |
+          bash scripts/install-tools.sh "$RUNNER_TEMP/ci-tools"
+          echo "$RUNNER_TEMP/ci-tools/bin" >> "$GITHUB_PATH"
+      - name: Validate workflows, scripts, Helm and regression tests
+        run: bash scripts/validate.sh
+      - name: Scan repository for secrets
+        run: trivy fs --scanners secret --exit-code 1 --no-progress --skip-dirs .git --skip-dirs .ci-output .
+      - name: Build and test Spring Boot application
+        env:
+          APP_JAR_PATH: ${{ vars.APP_JAR_PATH }}
+        run: bash scripts/build-app.sh
+      - name: Build one image from the tested JAR
+        run: |
+          image="ci-service:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker build --file .github/docker/Dockerfile --tag "$image" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" .ci-output
+          printf '%s\n' "$image" > .ci-output/image-ref.txt
+      - name: Scan the exact local image
+        run: |
+          image=$(cat .ci-output/image-ref.txt)
+          trivy image --image-src docker --scanners vuln,secret --severity HIGH,CRITICAL --exit-code 1 --no-progress "$image"
+      - name: Check image runtime or application startup
+        env:
+          IMAGE_SMOKE_MODE: ${{ vars.IMAGE_SMOKE_MODE || 'java' }}
+          IMAGE_SMOKE_ENV_FILE: ${{ vars.IMAGE_SMOKE_ENV_FILE }}
+        run: bash scripts/image-smoke-test.sh "$(cat .ci-output/image-ref.txt)"
+      - name: Export the tested image for publishing without rebuilding
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/master')
+        run: |
+          docker save "$(cat .ci-output/image-ref.txt)" | gzip -1 > .ci-output/image.tar.gz
+      - name: Save tested image
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/master')
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: tested-image-${{ github.run_id }}
+          path: |
+            .ci-output/image.tar.gz
+            .ci-output/image-ref.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+          overwrite: true
+      - name: Save test reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: test-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            **/target/surefire-reports/*.xml
+            **/target/failsafe-reports/*.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Publish tested image
+    needs: ci
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      bundle_name: ${{ steps.bundle.outputs.name }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: tested-image-${{ github.run_id }}
+          path: .ci-image
+      - name: Push exactly the tested image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/docker-auth.XXXXXXXX")
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker load --input .ci-image/image.tar.gz
+          local_image=$(cat .ci-image/image-ref.txt)
+          image_repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          image_tag="$image_repository:sha-$GITHUB_SHA-run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag "$local_image" "$image_tag"
+          docker push "$image_tag"
+          docker image inspect "$image_tag" > "$RUNNER_TEMP/image-inspect.json"
+          python3 scripts/create-release-bundle.py "$RUNNER_TEMP/image-inspect.json" "$image_repository" .release
+      - id: bundle
+        name: Identify release bundle
+        run: echo "name=release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - name: Save chart, scripts and immutable release metadata
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ${{ steps.bundle.outputs.name }}
+          path: .release/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy-dev:
+    name: Deploy dev
+    needs: publish
+    if: github.ref == 'refs/heads/dev'
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      target_environment: dev
+      bundle_name: ${{ needs.publish.outputs.bundle_name }}
+      source_sha: ${{ github.sha }}
+
+  deploy-prod:
+    name: Deploy production
+    needs: publish
+    # Explicit opt-in after configuring protection rules on the production environment.
+    if: github.ref == 'refs/heads/master' && vars.PRODUCTION_CD_ENABLED == 'true'
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      target_environment: production
+      bundle_name: ${{ needs.publish.outputs.bundle_name }}
+      source_sha: ${{ github.sha }}
