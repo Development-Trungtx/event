@@ -39,7 +39,7 @@ jobs:
       - name: Validate workflows, scripts, Helm and regression tests
         run: bash scripts/validate.sh
       - name: Scan repository for secrets
-        run: trivy fs --scanners secret --exit-code 1 --no-progress --skip-dirs .git --skip-dirs .ci-output .
+        run: trivy fs --scanners secret --offline-scan --exit-code 1 --no-progress --skip-dirs .git --skip-dirs .ci-output .
       - name: Build and test Spring Boot application
         env:
           APP_JAR_PATH: ${{ vars.APP_JAR_PATH }}
